@@ -3,6 +3,7 @@
 
 #define NUM_COLUMNS 6
 #define NUM_ROWS 5
+#define NUM_DEBOUNCE_SCANS 4
 #define ___ '\0'
 
 #define LED_PIN 11
@@ -130,12 +131,10 @@ const Color COLOR_ACTIVE = Color {
 uint32_t COLOR_CYCLE[LED_CYCLE_STEPS];
 
 
-// Keyboard state. The extra third keys array is used for debouncing, it is a "processing" array,
-// which is used to fact check the current keys array.
+// Keyboard state.
 
-bool keys_curr[NUM_COLUMNS][NUM_ROWS];
-bool keys_proc[NUM_COLUMNS][NUM_ROWS];
-bool keys_prev[NUM_COLUMNS][NUM_ROWS];
+bool key_scans[NUM_DEBOUNCE_SCANS][NUM_COLUMNS][NUM_ROWS] = { false };
+uint8_t current_scan = NUM_DEBOUNCE_SCANS - 1;
 
 Layer current_layer = LAYER_BASE;
 
@@ -155,14 +154,12 @@ Adafruit_NeoPixel neopixel(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 
 /**
- * Update the `keys_curr`, `keys_proc`, `keys_prev`, and `current_layer` variables with the current
- * keyboard state. This functions performs a scan of the key matrix.
+ * Update the `key_scans` and `current_layer` variables with the current keyboard state. This
+ * functions performs a scan of the key matrix.
  */
 static void update_keys() {
-    memcpy(&keys_prev, &keys_proc, sizeof(keys_curr));
-    memcpy(&keys_proc, &keys_curr, sizeof(keys_curr));
-
     current_layer = LAYER_BASE;
+    current_scan = (current_scan + 1) % NUM_DEBOUNCE_SCANS;
 
     for (uint8_t column = 0; column < NUM_COLUMNS; column++) {
         uint32_t column_pin = PIN_DESC_COLUMNS[column];
@@ -179,8 +176,8 @@ static void update_keys() {
         // 48 MHz = (48 * 1000 * 1000) Hz => 48^-1 μs per clock cycle.
         //
         // Each no-op should therefor take approx. 0.02 microseconds. Below is 25 such no-ops,
-        // without which holding the 1, 2, and 3 keys simultaniously would rapidly register
-        // erronious keypresses of the 4 key.
+        // without which holding the top row of the keyboard tends to get false presses on, as if
+        // there if some physical delay between clearing/setting a pin and seeing the effect.
         //
         // Its pretty fucking jank but it seems to work pretty damn well. In total its about a 0.521
         // microsecond delay.
@@ -219,7 +216,7 @@ static void update_keys() {
             uint32_t row_pin = PIN_DESC_ROWS[row];
             uint32_t row_mask = 1ul << row_pin;
 
-            keys_curr[column][row] = (PORT->Group[PORTA].IN.reg & row_mask) == 0;
+            key_scans[current_scan][column][row] = (PORT->Group[PORTA].IN.reg & row_mask) == 0;
         }
 
         // For whatever reason this nearly eliminates false positives with successive key presses
@@ -232,8 +229,8 @@ static void update_keys() {
         PORT->Group[PORTA].OUTSET.reg = column_mask;
     }
 
-    if (keys_curr[fn_key_pos_column][fn_key_pos_row]) {
-        keys_curr[fn_key_pos_column][fn_key_pos_row] = false;
+    if (key_scans[current_scan][fn_key_pos_column][fn_key_pos_row]) {
+        key_scans[current_scan][fn_key_pos_column][fn_key_pos_row] = false;
         current_layer = LAYER_FN;
     }
 
@@ -254,7 +251,23 @@ static void update_keys() {
  * Returns `true` if the key at the given position was pressed in the last scan.
  */
 static inline bool key_pressed(uint8_t column, uint8_t row) {
-    return keys_curr[column][row] && !keys_prev[column][row];
+    for (uint8_t i = 1; i < NUM_DEBOUNCE_SCANS / 2 + 1; i++) {
+        uint8_t scan_idx = (current_scan + i) % NUM_DEBOUNCE_SCANS;
+        
+        if (key_scans[scan_idx][column][row]) {
+            return false;
+        }
+    }
+    
+    for (uint8_t i = NUM_DEBOUNCE_SCANS / 2 + 1; i < NUM_DEBOUNCE_SCANS; i++) {
+        uint8_t scan_idx = (current_scan + i) % NUM_DEBOUNCE_SCANS;
+        
+        if (!key_scans[scan_idx][column][row]) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
@@ -262,7 +275,23 @@ static inline bool key_pressed(uint8_t column, uint8_t row) {
  * Returns `true` if the key at the given position was released in the last scan.
  */
 static inline bool key_released(uint8_t column, uint8_t row) {
-    return !keys_curr[column][row] && keys_prev[column][row];
+    for (uint8_t i = 1; i < NUM_DEBOUNCE_SCANS / 2 + 1; i++) {
+        uint8_t scan_idx = (current_scan + i) % NUM_DEBOUNCE_SCANS;
+        
+        if (!key_scans[scan_idx][column][row]) {
+            return false;
+        }
+    }
+    
+    for (uint8_t i = NUM_DEBOUNCE_SCANS / 2 + 1; i < NUM_DEBOUNCE_SCANS; i++) {
+        uint8_t scan_idx = (current_scan + i) % NUM_DEBOUNCE_SCANS;
+        
+        if (key_scans[scan_idx][column][row]) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
